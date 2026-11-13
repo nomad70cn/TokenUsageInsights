@@ -264,6 +264,16 @@ fn record_usage(
     }
 }
 
+fn is_orchestrator_planner_model(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    lower.starts_with("orchestrator ") || lower == "gemini-pro-orchestrator"
+}
+
+fn is_orchestrator_worker_model(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    lower == "gemini flash (worker)" || lower == "gemini-flash-worker-agy"
+}
+
 pub(crate) fn summarize_session_usage(
     pricing_rules: &PreparedPricingRules,
     entries: &[UsageEntry],
@@ -289,10 +299,20 @@ pub(crate) fn summarize_session_usage(
         display_entry = Some(entry);
     }
 
-    result.display_model = display_entry
+    let latest_model = display_entry.and_then(entry_model);
+    let session_display_model = if latest_model.is_some_and(is_orchestrator_worker_model) {
+        latest_usage_entry(entries.iter().filter(|entry| {
+            (entry.delta_tokens.as_ref().is_some_and(has_usage)
+                || entry.tokens.as_ref().is_some_and(has_usage))
+                && entry_model(entry).is_some_and(is_orchestrator_planner_model)
+        }))
         .and_then(entry_model)
-        .unwrap_or("Unknown Model")
-        .to_string();
+        .or(latest_model)
+    } else {
+        latest_model
+    };
+
+    result.display_model = session_display_model.unwrap_or("Unknown Model").to_string();
     result
 }
 
@@ -1098,5 +1118,57 @@ mod tests {
             let was_warned = WARNED_PRICING_MODELS.lock().unwrap().contains(model);
             assert!(was_warned, "其他缺少價格規則的模型仍應提示錯誤");
         }
+    }
+
+    #[test]
+    fn orchestrator_session_prefers_planner_display_model_while_splitting_model_totals() {
+        let rules = PreparedPricingRules::from_rules(vec![
+            PricingRule {
+                model_name: "Orchestrator (Carbon)".to_string(),
+                input_price: 4.0,
+                cache_input_price: 0.2,
+                output_price: 20.0,
+            },
+            PricingRule {
+                model_name: "Gemini Flash (Worker)".to_string(),
+                input_price: 1.5,
+                cache_input_price: 0.15,
+                output_price: 7.5,
+            },
+        ]);
+        let entries = vec![
+            summary_entry(
+                1,
+                "Orchestrator (Carbon)",
+                token_stats(1_000_000, 0, 0),
+                true,
+            ),
+            summary_entry(
+                2,
+                "Gemini Flash (Worker)",
+                token_stats(1_000_000, 0, 0),
+                true,
+            ),
+        ];
+
+        let summary = summarize_session_usage(&rules, &entries);
+        assert_eq!(summary.display_model, "Orchestrator (Carbon)");
+        assert_eq!(summary.models.len(), 2);
+        assert_eq!(summary.models[0].model, "Orchestrator (Carbon)");
+        assert_eq!(summary.models[1].model, "Gemini Flash (Worker)");
+        assert!((summary.usage.cost_usd - 5.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn explicit_model_switch_from_orchestrator_keeps_latest_non_worker_model() {
+        let rules = PreparedPricingRules::from_rules(vec![]);
+        let entries = vec![
+            summary_entry(1, "Orchestrator (Carbon)", token_stats(100, 20, 0), true),
+            summary_entry(2, "Gemini Flash (Worker)", token_stats(200, 30, 0), true),
+            summary_entry(3, "Claude Opus 5.5 (Medium)", token_stats(300, 40, 0), true),
+        ];
+
+        let summary = summarize_session_usage(&rules, &entries);
+        assert_eq!(summary.display_model, "Claude Opus 5.5 (Medium)");
     }
 }

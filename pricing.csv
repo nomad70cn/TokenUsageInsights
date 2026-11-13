@@ -252,3 +252,10 @@ muse-spark-1.3,Meta,1M Tokens,1.25,0.15,4.25,N/A
 muse-spark-1.3-contributor,Meta,1M Tokens,0.10,0.002,0.20,N/A
 muse-spark-1.2,Meta,1M Tokens,1.25,0.15,4.25,N/A
 muse-spark-1.2-contributor,Meta,1M Tokens,0.10,0.002,0.20,N/A
+Orchestrator (Carbon),Antigravity,1M Tokens,4.00,0.20,20.00,N/A
+Orchestrator (Argon),Antigravity,1M Tokens,4.00,0.20,20.00,N/A
+Orchestrator (Hydrogen),Antigravity,1M Tokens,1.50,0.075,7.50,N/A
+Gemini Flash (Worker),Antigravity,1M Tokens,1.50,0.15,7.50,N/A
+Gemini Flash,Antigravity,1M Tokens,1.50,0.15,7.50,N/A
+gemini-pro-orchestrator,Antigravity,1M Tokens,4.00,0.20,20.00,N/A
+gemini-flash-worker-agy,Antigravity,1M Tokens,1.50,0.15,7.50,N/A

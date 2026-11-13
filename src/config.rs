@@ -21,6 +21,19 @@ pub(crate) enum Harness {
     Mcode,
 }
 
+fn antigravity_default_roots(env_override: Option<PathBuf>, home: Option<PathBuf>) -> Vec<PathBuf> {
+    if let Some(dir) = env_override {
+        return vec![dir];
+    }
+    if let Some(h) = home {
+        return vec![
+            h.join(".gemini").join("antigravity-cli"),
+            h.join(".gemini").join("antigravity"),
+        ];
+    }
+    vec![PathBuf::from(".")]
+}
+
 impl Harness {
     pub(crate) fn primary_root(self) -> Option<PathBuf> {
         use crate::db;
@@ -102,7 +115,11 @@ impl SourceConfig {
     }
 
     pub(crate) fn roots(&self, harness: Harness) -> Vec<PathBuf> {
-        let mut roots: Vec<_> = harness.primary_root().into_iter().collect();
+        let mut roots: Vec<_> = if harness == Harness::Antigravity {
+            antigravity_default_roots(crate::paths::env_path("ANTIGRAVITY_DIR"), dirs::home_dir())
+        } else {
+            harness.primary_root().into_iter().collect()
+        };
         if let Some(additional) = self.additional_sources.get(&harness) {
             roots.extend(additional.iter().cloned());
         }
@@ -250,5 +267,26 @@ mod tests {
             1
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn antigravity_default_roots_include_app_dir_unless_env_overridden() {
+        let home = PathBuf::from("/tmp/example-home");
+        assert_eq!(
+            antigravity_default_roots(None, Some(home.clone())),
+            vec![
+                home.join(".gemini").join("antigravity-cli"),
+                home.join(".gemini").join("antigravity"),
+            ]
+        );
+        let override_dir = PathBuf::from("/tmp/custom-antigravity");
+        assert_eq!(
+            antigravity_default_roots(Some(override_dir.clone()), Some(home)),
+            vec![override_dir]
+        );
+        assert_eq!(
+            antigravity_default_roots(None, None),
+            vec![PathBuf::from(".")]
+        );
     }
 }

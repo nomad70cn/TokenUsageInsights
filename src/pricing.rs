@@ -1680,4 +1680,26 @@ mod tests {
         .expect("muse-spark-1.2-contributor should have a pricing rule");
         assert!((contributor_12 - 0.302).abs() < 1e-12);
     }
+
+    #[test]
+    fn antigravity_orchestrator_and_desktop_models_resolve_pricing_from_csv() {
+        let rules = load_prepared_pricing_rules();
+
+        for (model_name, expected) in [
+            ("Orchestrator (Carbon)", 24.20),
+            ("Gemini Flash (Worker)", 9.15),
+            ("Gemini 3.1 Pro (High)", 22.40),
+            ("Claude Opus 5.5 (Medium)", 24.20),
+            ("Gemini 3.8 Flash", 9.15),
+            ("Gemini 1.5 Flash", 0.39375),
+        ] {
+            let cost = rules
+                .calculate_cost(model_name, 1_000_000, 1_000_000, 1_000_000, 0, 0)
+                .unwrap_or_else(|err| panic!("pricing missing for {model_name}: {err}"));
+            assert!(
+                (cost - expected).abs() < 1e-9,
+                "unexpected cost for {model_name}: {cost}, expected {expected}"
+            );
+        }
+    }
 }

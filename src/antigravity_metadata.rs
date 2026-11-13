@@ -31,6 +31,14 @@ fn clean_metadata_label(bytes: &[u8]) -> Option<String> {
     Some(text.to_owned())
 }
 
+fn clean_ascii_model_label(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if text.is_empty() || text.len() > 200 || !text.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return None;
+    }
+    Some(text.to_owned())
+}
+
 fn clean_metadata_prompt(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?.trim();
     if text.is_empty() {
@@ -473,11 +481,20 @@ fn read_response_models(conn: &Connection) -> rusqlite::Result<HashMap<u32, Stri
             return Ok(HashMap::new());
         }
     }
-    // Observed in Antigravity CLI's SQLite data and embedded protobuf descriptors:
-    // gen_metadata.data: field 4 = generation UUID, field 1.19 = model UID.
+    // Observed in Antigravity CLI/App SQLite data and embedded protobuf descriptors:
+    // gen_metadata.data: field 4 = generation UUID, field 1.19 = model UID,
+    // field 1.21 = human-readable model display name.
     // steps.metadata: field 12 = generation UUID. The steps.idx is the transcript
     // step_index; gen_metadata.idx is a different index and must not be joined to it.
-    let mut generations: HashMap<Vec<u8>, Option<String>> = HashMap::new();
+    #[derive(Default)]
+    struct GenerationModelInfo {
+        uid: Option<String>,
+        uid_unresolved: bool,
+        display_name: Option<String>,
+        display_unresolved: bool,
+    }
+
+    let mut generation_info: HashMap<Vec<u8>, GenerationModelInfo> = HashMap::new();
     let mut statement = conn.prepare("SELECT data FROM gen_metadata")?;
     let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
     for row in rows {
@@ -491,28 +508,51 @@ fn read_response_models(conn: &Connection) -> rusqlite::Result<HashMap<u32, Stri
         let Some(inner) = bytes_field(&fields, 1).and_then(protobuf_fields) else {
             continue;
         };
-        let Some(uid) = bytes_field(&inner, 19).and_then(|v| std::str::from_utf8(v).ok()) else {
-            continue;
-        };
-        // Preserve unknown identifiers, but never expose arbitrary binary payloads.
-        if uid.is_empty()
-            || uid.len() > 200
-            || !uid
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b))
-        {
-            continue;
-        }
-        let model = model_label(uid).to_owned();
-        generations
-            .entry(id.to_vec())
-            .and_modify(|previous| {
-                if previous.as_ref() != Some(&model) {
-                    *previous = None;
+        let entry = generation_info.entry(id.to_vec()).or_default();
+
+        if let Some(raw_uid) = bytes_field(&inner, 19).filter(|v| !v.is_empty()) {
+            // Preserve unknown identifiers, but never expose arbitrary binary payloads.
+            match std::str::from_utf8(raw_uid) {
+                Ok(uid)
+                    if uid.len() <= 200
+                        && uid
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b)) =>
+                {
+                    merge_unique_option(&mut entry.uid, &mut entry.uid_unresolved, uid.to_owned());
                 }
-            })
-            .or_insert(Some(model));
+                _ => {
+                    entry.uid = None;
+                    entry.uid_unresolved = true;
+                }
+            }
+        }
+
+        if let Some(raw_display) = bytes_field(&inner, 21).filter(|v| !v.is_empty()) {
+            if let Some(label) = clean_ascii_model_label(raw_display) {
+                merge_unique_option(
+                    &mut entry.display_name,
+                    &mut entry.display_unresolved,
+                    label,
+                );
+            } else {
+                entry.display_name = None;
+                entry.display_unresolved = true;
+            }
+        }
     }
+
+    let generations: HashMap<Vec<u8>, String> = generation_info
+        .into_iter()
+        .filter_map(|(id, info)| {
+            if info.uid_unresolved || info.display_unresolved {
+                return None;
+            }
+            resolve_generation_model(info.uid.as_deref(), info.display_name)
+                .map(|model| (id, model))
+        })
+        .collect();
+
     let mut result = HashMap::new();
     let mut statement =
         conn.prepare("SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL")?;
@@ -527,28 +567,50 @@ fn read_response_models(conn: &Connection) -> rusqlite::Result<HashMap<u32, Stri
         let Some(fields) = protobuf_fields(&blob) else {
             continue;
         };
-        if let Some(Some(model)) = bytes_field(&fields, 12).and_then(|id| generations.get(id)) {
+        if let Some(model) = bytes_field(&fields, 12).and_then(|id| generations.get(id)) {
             result.insert(index, model.clone());
         }
     }
     Ok(result)
 }
 
+fn resolve_generation_model(uid: Option<&str>, display_name: Option<String>) -> Option<String> {
+    if uid.is_some_and(|u| {
+        u.eq_ignore_ascii_case("gemini-flash-worker-agy") || u.ends_with("-worker-agy")
+    }) && display_name
+        .as_deref()
+        .unwrap_or("Gemini Flash")
+        .eq_ignore_ascii_case("Gemini Flash")
+    {
+        return Some("Gemini Flash (Worker)".to_owned());
+    }
+    if let Some(display) = display_name {
+        return Some(display);
+    }
+    uid.map(|u| model_label(u).to_owned())
+}
+
 fn model_label(uid: &str) -> &str {
     // Verified with `agy models`; keep aliases explicit so unknown future models
     // cannot silently inherit an unrelated model's price.
     match uid {
+        "gemini-pro-orchestrator" => "Orchestrator (Carbon)",
+        "gemini-flash-worker-agy" => "Gemini Flash (Worker)",
+        "gemini-4-carbon" => "Gemini 4 Carbon",
         "gemini-4-carbon-medium" => "Gemini 4 Carbon (Medium)",
         "gemini-4-carbon-high" => "Gemini 4 Carbon (High)",
         "gemini-4-carbon-low" => "Gemini 4 Carbon (Low)",
+        "gemini-4-argon" | "gemini-4-argon-b" => "Gemini 4 Argon",
         "agy-demo-medium" | "gemini-4-argon-medium" => "Gemini 4 Argon (Medium)",
         "agy-demo-high" | "gemini-4-argon-high" => "Gemini 4 Argon (High)",
         "agy-demo-low" | "gemini-4-argon-low" => "Gemini 4 Argon (Low)",
+        "gemini-3.8-flash-tiered" | "gemini-3.8-flash-n" => "Gemini 3.8 Flash",
         "gemini-3.8-flash-high" => "Gemini 3.8 Flash (High)",
         "gemini-3.8-flash-medium" => "Gemini 3.8 Flash (Medium)",
         "gemini-3.8-flash-low" => "Gemini 3.8 Flash (Low)",
         "gemini-flash-demo" => "Gemini 3.7 Flash",
         "gemini-3.8-flash-demo" => "Gemini 3.8 Flash",
+        "gemini-pro-default" => "Gemini 3.1 Pro",
         _ => uid,
     }
 }
@@ -889,5 +951,106 @@ mod tests {
         assert_eq!(metadata.agent_type.as_deref(), Some("self"));
         assert_eq!(metadata.agent_role.as_deref(), Some("Audio Builder Agent"));
         assert_eq!(metadata.cwd.as_deref(), Some("/example/demo"));
+    }
+
+    #[test]
+    fn orchestrator_and_display_name_metadata_resolve_consistently() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE gen_metadata(idx INTEGER, data BLOB);
+             CREATE TABLE steps(idx INTEGER, metadata BLOB);",
+        )
+        .unwrap();
+
+        let insert_gen = |idx: i64, gen_id: &str, uid: Option<&str>, display: Option<&str>| {
+            let mut inner = Vec::new();
+            if let Some(uid) = uid {
+                inner.extend(field(19, uid.as_bytes()));
+            }
+            if let Some(display) = display {
+                inner.extend(field(21, display.as_bytes()));
+            }
+            let mut blob = field(4, gen_id.as_bytes());
+            blob.extend(field(1, &inner));
+            conn.execute(
+                "INSERT INTO gen_metadata VALUES (?1, ?2)",
+                rusqlite::params![idx, blob],
+            )
+            .unwrap();
+        };
+
+        let insert_step = |step_idx: i64, gen_id: &str| {
+            conn.execute(
+                "INSERT INTO steps VALUES (?1, ?2)",
+                rusqlite::params![step_idx, field(12, gen_id.as_bytes())],
+            )
+            .unwrap();
+        };
+
+        // 1. Orchestrator planner
+        insert_gen(
+            1,
+            "gen-planner",
+            Some("gemini-pro-orchestrator"),
+            Some("Orchestrator (Carbon)"),
+        );
+        insert_step(1, "gen-planner");
+
+        // 2. Orchestrator worker with trailing empty-uid row on the same generation UUID
+        insert_gen(
+            2,
+            "gen-worker",
+            Some("gemini-flash-worker-agy"),
+            Some("Gemini Flash"),
+        );
+        insert_gen(3, "gen-worker", Some(""), Some("Gemini Flash"));
+        insert_step(5, "gen-worker");
+
+        // 3. Field 21 display name preferred over fallback uid label
+        insert_gen(
+            4,
+            "gen-pro",
+            Some("gemini-pro-default"),
+            Some("Gemini 3.1 Pro (High)"),
+        );
+        insert_step(9, "gen-pro");
+
+        // 4. Tiered uid fallback when field 21 is absent
+        insert_gen(5, "gen-tiered", Some("gemini-3.8-flash-tiered"), None);
+        insert_step(12, "gen-tiered");
+
+        // 5. Conflicting display names on same generation UUID omit attribution
+        insert_gen(
+            6,
+            "gen-conflict",
+            Some("gemini-4-carbon"),
+            Some("Gemini 4 Carbon (Medium)"),
+        );
+        insert_gen(
+            7,
+            "gen-conflict",
+            Some("gemini-4-carbon"),
+            Some("Gemini 4 Carbon (High)"),
+        );
+        insert_step(15, "gen-conflict");
+
+        let models = read_response_models(&conn).unwrap();
+        assert_eq!(
+            models.get(&1).map(String::as_str),
+            Some("Orchestrator (Carbon)")
+        );
+        assert_eq!(
+            models.get(&5).map(String::as_str),
+            Some("Gemini Flash (Worker)")
+        );
+        assert_eq!(
+            models.get(&9).map(String::as_str),
+            Some("Gemini 3.1 Pro (High)")
+        );
+        assert_eq!(
+            models.get(&12).map(String::as_str),
+            Some("Gemini 3.8 Flash")
+        );
+        assert!(!models.contains_key(&15));
     }
 }

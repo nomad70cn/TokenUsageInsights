@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const SOURCE_KIND: &str = "antigravity-session";
 // Bump when parsed fields change so unchanged historical sources are re-imported.
-pub(crate) const PARSER_VERSION: u32 = 3;
+pub(crate) const PARSER_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AntigravitySystemMessage {
@@ -55,6 +55,19 @@ pub fn parse_system_message(raw: &str) -> Option<AntigravitySystemMessage> {
         .strip_suffix("</SYSTEM_MESSAGE>")
         .map(str::trim)
         .unwrap_or(body);
+
+    if body.starts_with("Plan mode is off:") {
+        return Some(AntigravitySystemMessage::SystemLifecycle {
+            status_type: "orchestrator_execute",
+            message: "進入執行階段：切換至執行模型 (Plan Mode Off)".to_owned(),
+        });
+    }
+    if body.starts_with("[plan review]") {
+        return Some(AntigravitySystemMessage::SystemLifecycle {
+            status_type: "orchestrator_review",
+            message: "返回規劃審查：切換回規劃模型 (Plan Review)".to_owned(),
+        });
+    }
 
     let rest = body.strip_prefix("[Message]")?.trim_start();
     let rest = rest.strip_prefix("timestamp=")?.trim_start();
@@ -345,4 +358,80 @@ pub(crate) fn parse_session(path: &Path) -> Result<Vec<UsageEntry>, String> {
     }
 
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parses_orchestrator_phase_transitions_from_system_messages() {
+        let execute = parse_system_message(
+            "The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\nPlan mode is off: this turn runs on the execution model.\n</SYSTEM_MESSAGE>",
+        );
+        assert_eq!(
+            execute,
+            Some(AntigravitySystemMessage::SystemLifecycle {
+                status_type: "orchestrator_execute",
+                message: "進入執行階段：切換至執行模型 (Plan Mode Off)".to_owned(),
+            })
+        );
+
+        let review = parse_system_message(
+            "<SYSTEM_MESSAGE>\n[plan review] Return to planning review.\n</SYSTEM_MESSAGE>",
+        );
+        assert_eq!(
+            review,
+            Some(AntigravitySystemMessage::SystemLifecycle {
+                status_type: "orchestrator_review",
+                message: "返回規劃審查：切換回規劃模型 (Plan Review)".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn orchestrator_session_preserves_initial_user_prompt_as_session_name() {
+        let root = std::env::temp_dir().join(format!(
+            "antigravity-orchestrator-session-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session_id = "orchestrator-session";
+        let log_path = root
+            .join("brain")
+            .join(session_id)
+            .join(".system_generated/logs/transcript_full.jsonl");
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        fs::write(
+            &log_path,
+            concat!(
+                r#"{"type":"USER_INPUT","created_at":"2026-11-13T10:00:00Z","content":"<USER_REQUEST>\nBuild Orchestrator support\n</USER_REQUEST>"}"#,
+                "\n",
+                r#"{"type":"PLANNER_RESPONSE","step_index":1,"created_at":"2026-11-13T10:00:01Z","model":"Orchestrator (Carbon)","input_tokens":100,"output_tokens":20}"#,
+                "\n",
+                r#"{"type":"SYSTEM_MESSAGE","created_at":"2026-11-13T10:00:02Z","content":"<SYSTEM_MESSAGE>\nPlan mode is off: this turn runs on the execution model.\n</SYSTEM_MESSAGE>"}"#,
+                "\n",
+                r#"{"type":"PLANNER_RESPONSE","step_index":2,"created_at":"2026-11-13T10:00:03Z","model":"Gemini Flash (Worker)","input_tokens":50,"output_tokens":10}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let entries = parse_session(&log_path).unwrap();
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].session_name.as_deref(),
+            Some("Build Orchestrator support")
+        );
+        assert_eq!(
+            entries[1].session_name.as_deref(),
+            Some("Build Orchestrator support")
+        );
+    }
 }
