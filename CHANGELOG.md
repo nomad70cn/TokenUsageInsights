@@ -4,6 +4,18 @@
 
 ## [未發行]
 
+### 新增與改善
+
+- 支援 Antigravity App 來源掃描與 Orchestrator 編排模式（`Orchestrator (Carbon)`、`Gemini Flash (Worker)` 等），提供模型名稱辨識、費率套用與對話階段時間軸呈現。
+- 依 Google Cloud Vertex AI 與各模型官方定價文件補齊 `Gemini 3.1 Pro` 基礎列、`Gemini 3.5 Flash-Lite`、`Gemini 3.1 Flash-Lite`、`Gemini 2.5 Pro`／`Flash`／`Flash-Lite`、`Gemini 2.0 Flash`／`Flash-Lite`、`Gemini 1.5 Flash`，以及 `Claude Fable 5.2`（含 `-fast`）、`Claude Fable 5.1`、`Claude Opus 5-fast` 與 `Claude Sonnet 4.5` 長上下文分級（`>200k`）。
+- 擴充 `scripts/pricing-check.mjs` 以支援 Google AI Studio Markdoc 價格表格與巢狀括號模型說明解析。
+
+### 修正
+
+- 修正 `Gemini 3.5 Flash` 快取輸入費率由誤植的 25%（`0.375`，批次 `0.1875`）更正為 Vertex AI / Google AI 標準的 10%（`0.15`，批次 `0.075`）。
+- 移除 `Claude Opus 4.6` 與 `Claude Opus 4.6 (Thinking)` 過時的 `>200k` 長上下文加價列（`10.00 / 1.00 / 37.50`），對齊官方全 1M 上下文統一標準費率（`5.00 / 0.50 / 25.00`）。
+- 更正 `pricing.csv` 中 `Cursor` 部署區段誤套用 1.5 Flash 佔位價的 `gemini-2.0-flash` 與 `gemini-2.5-flash` 費率。
+
 ## [1.6.7] - 2026-11-13
 
 本次 patch release 新增 Gemini 4 Hydrogen 的費用估算規則，並升級自我更新功能使用的 ZIP 解壓縮套件。

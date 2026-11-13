@@ -29,9 +29,9 @@ fn fallback_pricing_entries() -> Vec<PricingEntry> {
             deployment_type: "Google AI".to_string(),
             unit: "1M Tokens".to_string(),
             input_price: 1.50,
-            cache_input_price: 0.375,
+            cache_input_price: 0.15,
             output_price: 9.00,
-            batch_api_price: "0.75/0.1875/4.50".to_string(),
+            batch_api_price: "0.75/0.075/4.50".to_string(),
         },
         PricingEntry {
             model_name: "Gemini 1.5 Flash".to_string(),
@@ -55,10 +55,10 @@ fn fallback_pricing_entries() -> Vec<PricingEntry> {
             model_name: "Gemini 2.0 Flash".to_string(),
             deployment_type: "Google AI".to_string(),
             unit: "1M Tokens".to_string(),
-            input_price: 0.10,
-            cache_input_price: 0.025,
-            output_price: 0.40,
-            batch_api_price: "0.05/0.0125/0.20".to_string(),
+            input_price: 0.15,
+            cache_input_price: 0.0375,
+            output_price: 0.60,
+            batch_api_price: "0.075/0.01875/0.30".to_string(),
         },
     ]
 }
@@ -1701,5 +1701,78 @@ mod tests {
                 "unexpected cost for {model_name}: {cost}, expected {expected}"
             );
         }
+    }
+
+    #[test]
+    fn vertex_ai_gemini_and_claude_pricing_alignment() {
+        let rules = load_prepared_pricing_rules();
+
+        // 1M input + 1M cache_read + 1M output flat-rate models
+        for (model_name, expected) in [
+            ("Gemini 3.5 Flash", 10.65),
+            ("Gemini 3.5 Flash (High)", 10.65),
+            ("Gemini 3.5 Flash-Lite", 2.83),
+            ("Gemini 3.1 Flash-Lite", 1.775),
+            ("Gemini 2.5 Flash", 2.83),
+            ("gemini-2.5-flash", 2.83),
+            ("Gemini 2.5 Flash-Lite", 0.51),
+            ("Gemini 2.0 Flash", 0.7875),
+            ("Gemini 2.0 Flash-Lite", 0.39375),
+            ("Claude Fable 5.2", 48.20),
+            ("Claude Fable 5.2-fast", 96.40),
+            ("Claude Fable 5.1", 60.25),
+        ] {
+            let cost = rules
+                .calculate_cost(model_name, 1_000_000, 1_000_000, 1_000_000, 0, 0)
+                .unwrap_or_else(|err| panic!("pricing missing for {model_name}: {err}"));
+            assert!(
+                (cost - expected).abs() < 1e-9,
+                "unexpected cost for {model_name}: {cost}, expected {expected}"
+            );
+        }
+
+        // Gemini 2.5 Pro & Gemini 3.1 Pro context length tiers
+        let g25p_short = rules
+            .calculate_cost("Gemini 2.5 Pro", 100_000, 100_000, 0, 0, 0)
+            .expect("Gemini 2.5 Pro <=200k");
+        assert!((g25p_short - 1.125).abs() < 1e-9);
+        let g25p_long = rules
+            .calculate_cost("Gemini 2.5 Pro", 300_000, 100_000, 0, 0, 0)
+            .expect("Gemini 2.5 Pro >200k");
+        assert!((g25p_long - 2.25).abs() < 1e-9);
+
+        let g31p_short = rules
+            .calculate_cost("Gemini 3.1 Pro", 100_000, 100_000, 0, 0, 0)
+            .expect("Gemini 3.1 Pro <=200k");
+        assert!((g31p_short - 1.40).abs() < 1e-9);
+        let g31p_long = rules
+            .calculate_cost("Gemini 3.1 Pro", 300_000, 100_000, 0, 0, 0)
+            .expect("Gemini 3.1 Pro >200k");
+        assert!((g31p_long - 3.00).abs() < 1e-9);
+
+        // Claude Opus 4.6 & (Thinking) have full 1M context at standard rate (no >200k surcharge)
+        for opus46 in ["Claude Opus 4.6", "Claude Opus 4.6 (Thinking)"] {
+            let cost = rules
+                .calculate_cost(opus46, 300_000, 100_000, 100_000, 0, 0)
+                .unwrap_or_else(|err| panic!("pricing missing for {opus46}: {err}"));
+            // 0.3 * 5.00 + 0.1 * 0.50 + 0.1 * 25.00 = 4.05
+            assert!(
+                (cost - 4.05).abs() < 1e-9,
+                "unexpected >200k cost for {opus46}: {cost}, expected 4.05"
+            );
+        }
+
+        // Claude Sonnet 4.5 still has Vertex AI >200k long-context pricing
+        let sonnet45_short = rules
+            .calculate_cost("Claude Sonnet 4.5", 100_000, 100_000, 50_000, 0, 0)
+            .expect("Claude Sonnet 4.5 <=200k");
+        // 0.1 * 3.00 + 0.05 * 0.30 + 0.1 * 15.00 = 1.815
+        assert!((sonnet45_short - 1.815).abs() < 1e-9);
+
+        let sonnet45_long = rules
+            .calculate_cost("Claude Sonnet 4.5", 250_000, 100_000, 100_000, 100_000, 0)
+            .expect("Claude Sonnet 4.5 >200k");
+        // 0.25 * 6.00 + 0.1 * 0.60 + 0.1 * 22.50 + 0.1 * (6.00 * 1.25) = 4.56
+        assert!((sonnet45_long - 4.56).abs() < 1e-9);
     }
 }

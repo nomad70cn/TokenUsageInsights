@@ -60,7 +60,13 @@ export function stripMarkup(text) {
 }
 
 export function officialKey(name) {
-  return normalizeName(stripMarkup(name).replace(/\([^)]*\)/g, '').replace(/[^\x20-\x7E]/g, ''));
+  let cleaned = stripMarkup(name);
+  let prev;
+  do {
+    prev = cleaned;
+    cleaned = cleaned.replace(/\([^()]*\)/g, '');
+  } while (cleaned !== prev);
+  return normalizeName(cleaned.replace(/[^\x20-\x7E]/g, ''));
 }
 
 // 取出價格文字中的第一個金額；若為促銷格式（"$0.75 through Dec 31, 2026. $1.50 starting ..."）一併回傳促銷後價格。
@@ -128,41 +134,93 @@ export function parseTableProvider(md, heading) {
   return entries;
 }
 
-// Google 定價頁以「## 模型名稱 → ### Standard 表格」呈現，價格在 Paid Tier 欄。
+// Google 定價頁以「## 模型名稱 → ### Standard / {% tab title="Standard" %} 表格」呈現，價格在 Paid Tier 欄。
 export function parseGeminiProvider(md) {
   const entries = new Map();
   const lines = md.split(/\r?\n/);
   let model = null;
   let inStandard = false;
+  let inMarkdocTable = false;
+  let tableCells = [];
   let row = {};
+  const applyRow = (labelText, paidText) => {
+    const label = (labelText || '').toLowerCase();
+    if (label.startsWith('input price')) row.input = parsePrice(paidText);
+    else if (label.startsWith('output price')) row.output = parsePrice(paidText);
+    else if (label.startsWith('context caching price')) row.cached = parsePrice(paidText);
+  };
+  const flushCells = () => {
+    if (tableCells.length >= 2) {
+      applyRow(tableCells[0], tableCells[tableCells.length - 1]);
+    }
+    tableCells = [];
+  };
   const flush = () => {
+    flushCells();
     if (model && row.input && row.output) {
       const key = officialKey(model);
       if (!entries.has(key)) entries.set(key, { name: model, input: row.input, output: row.output, cached: row.cached || null });
     }
     row = {};
   };
-  for (const line of lines) {
-    const h2 = line.match(/^##\s+(.+)$/);
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    const h2 = rawLine.match(/^##\s+(.+)$/);
     if (h2) {
       flush();
-      model = h2[1].replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[^\x20-\x7E]/g, '').trim();
+      model = h2[1]
+        .replace(/\{%[^%]*%\}/g, '')
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/[^\x20-\x7E]/g, '')
+        .trim();
       inStandard = false;
+      inMarkdocTable = false;
       continue;
     }
-    const h3 = line.match(/^###\s+(.+)$/);
+    const h3 = rawLine.match(/^###\s+(.+)$/);
     if (h3) {
       if (inStandard) flush();
       inStandard = h3[1].trim() === 'Standard';
+      inMarkdocTable = false;
       continue;
     }
-    if (!inStandard || !line.trim().startsWith('|')) continue;
-    const cells = splitRow(line);
-    const label = (cells[0] || '').toLowerCase();
-    const paid = cells[cells.length - 1];
-    if (label.startsWith('input price')) row.input = parsePrice(paid);
-    else if (label.startsWith('output price')) row.output = parsePrice(paid);
-    else if (label.startsWith('context caching price')) row.cached = parsePrice(paid);
+    const tabMatch = trimmed.match(/^\{%\s*tab\s+title="([^"]+)"\s*%\}$/i);
+    if (tabMatch) {
+      if (inStandard) flush();
+      inStandard = tabMatch[1].trim() === 'Standard';
+      inMarkdocTable = false;
+      continue;
+    }
+    if (/^\{%\s*\/tab\s*%\}$/i.test(trimmed)) {
+      if (inStandard) flush();
+      inStandard = false;
+      inMarkdocTable = false;
+      continue;
+    }
+    if (!inStandard) continue;
+    if (/^\{%\s*table\s*%\}$/i.test(trimmed)) {
+      inMarkdocTable = true;
+      tableCells = [];
+      continue;
+    }
+    if (/^\{%\s*\/table\s*%\}$/i.test(trimmed)) {
+      flushCells();
+      inMarkdocTable = false;
+      continue;
+    }
+    if (inMarkdocTable) {
+      if (trimmed === '---') {
+        flushCells();
+      } else if (trimmed.startsWith('* ')) {
+        tableCells.push(trimmed.slice(2).trim());
+      } else if (trimmed && !trimmed.startsWith('{%') && tableCells.length > 0) {
+        tableCells[tableCells.length - 1] += ` ${trimmed}`;
+      }
+      continue;
+    }
+    if (!trimmed.startsWith('|')) continue;
+    const cells = splitRow(rawLine);
+    applyRow(cells[0], cells[cells.length - 1]);
   }
   flush();
   return entries;

@@ -124,3 +124,54 @@ Gemini 3.8 Flash,Google AI,1M Tokens,0.75,0.075,3.75,N/A
   assert.equal(result.mismatches.length, 1);
   assert.match(result.mismatches[0].diffs[0], /標準價/);
 });
+
+test('officialKey 去除巢狀括號說明', async () => {
+  const { officialKey } = await import('../scripts/pricing-check.mjs');
+  assert.equal(
+    officialKey('Claude Opus 4.1 ([retired, except on Google Cloud (Google managed) and Bedrock](https://example.com))'),
+    'claude opus 4.1',
+  );
+});
+
+test('parseGeminiProvider 支援 AI Studio Markdoc tab 與跨行促銷價格式', () => {
+  const markdocMd = `## Gemini 4 Carbon  {% id="gemini-4-carbon" %}
+
+{% tabs %}
+  {% tab title="Standard" %}
+  {% table %}
+  * Feature
+  * Free Tier
+  * Paid Tier, per 1M tokens in USD
+
+  ---
+
+  * Input price
+  * Not available
+  * $2.00 through November 30, 2026.
+  $4.00 starting December 1, 2026.
+
+  ---
+
+  * Output price (including thinking tokens)
+  * Not available
+  * $10.00 through November 30, 2026.
+  $20.00 starting December 1, 2026.
+
+  ---
+
+  * Context caching price
+  * Not available
+  * $0.10 through November 30, 2026.
+  $0.20 starting December 1, 2026.
+  {% /table %}
+  {% /tab %}
+{% /tabs %}
+`;
+  const entries = parseGeminiProvider(markdocMd);
+  const carbon = entries.get('gemini 4 carbon');
+  assert.ok(carbon);
+  assert.equal(carbon.input.now, 2);
+  assert.equal(carbon.input.after, 4);
+  assert.equal(carbon.output.after, 20);
+  assert.equal(carbon.cached.after, 0.2);
+});

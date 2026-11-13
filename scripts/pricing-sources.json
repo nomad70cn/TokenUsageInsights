@@ -11,7 +11,7 @@
       "parser": "table",
       "sectionHeading": "## Model pricing",
       "ignoreModels": [
-        "Claude Fable 5.1",
+        "Claude Mythos 5.2",
         "Claude Mythos 5.1",
         "Claude Mythos 5",
         "Claude Opus 4.1",
@@ -65,13 +65,7 @@
       "pageUrl": "https://ai.google.dev/gemini-api/docs/pricing",
       "sourceUrl": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
       "parser": "gemini",
-      "ignoreModels": [
-        "Gemini 3.5 Flash-Lite",
-        "Gemini 3.1 Flash-Lite",
-        "Gemini 2.5 Pro",
-        "Gemini 2.5 Flash",
-        "Gemini 2.5 Flash-Lite"
-      ]
+      "ignoreModels": []
     },
     {
       "name": "xAI",
